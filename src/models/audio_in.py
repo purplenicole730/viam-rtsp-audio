@@ -11,7 +11,7 @@ from viam.proto.component.audioin import AudioChunk, GetAudioResponse
 from viam.resource.base import ResourceBase
 from viam.resource.easy_resource import EasyResource
 from viam.resource.types import Model, ModelFamily
-from viam.streams import StreamWithIterator
+from viam.streams import Stream, StreamWithIterator
 from viam.utils import ValueTypes
 
 
@@ -192,11 +192,18 @@ class AudioIn(AudioIn, EasyResource):
         self,
         codec: str,
         duration_seconds: float,
+        # previous_timestamp_ns is purely only for timestamp continuity. It deson't call past audio
         previous_timestamp_ns: int,
         *,
         timeout: Optional[float] = None,
         **kwargs,
     ) -> "AudioIn.AudioStream":
+        # Map requested codec to FFmpeg encoder and output format
+        # Currently only PCM16 is supported; other codecs could be added here
+        ffmpeg_codec = "pcm_s16le"
+        output_format = "s16le"
+        codec_name = codec if codec else "pcm16"
+
         cmd = [
             "ffmpeg",
             "-rtsp_transport",
@@ -205,50 +212,103 @@ class AudioIn(AudioIn, EasyResource):
             self.rtsp_url,
             "-vn",
             "-acodec",
-            "pcm_s16le",
+            ffmpeg_codec,
             "-ar",
             str(self.sample_rate),
             "-ac",
             str(self.channels),
             "-filter:a",
             f"volume={self.volume_boost}",
-            "-t",
-            str(duration_seconds) if duration_seconds > 0 else "5",
             "-f",
-            "wav",
+            output_format,
             "pipe:1",
         ]
+
+        # Only add -t if a finite duration is requested; 0 means stream indefinitely
+        if duration_seconds > 0:
+            cmd.insert(-2, "-t")
+            cmd.insert(-2, str(duration_seconds))
+
         self.logger.info(
-            f"Starting audio capture: {duration_seconds}s from {self.rtsp_url}"
+            f"Starting audio stream: codec={codec_name}, duration={duration_seconds}s "
+            f"from {self.rtsp_url}"
         )
 
         process = await asyncio.create_subprocess_exec(
-            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        audio_data, stderr = await process.communicate()
-        if process.returncode != 0:
-            error_msg = stderr.decode()
-            self.logger.error(f"FFmpeg error: {error_msg}")
-            raise RuntimeError(f"Failed to capture audio: {error_msg}")
 
-        self.logger.info(f"Captured {len(audio_data)} bytes of audio")
-
-        chunk = AudioChunk(
-            audio_data=audio_data,
-            audio_info=AudioInfo(),
-            sequence=0,
+        # 1 second of audio = sample_rate * channels * 2 bytes (16-bit PCM)
+        chunk_size = self.sample_rate * self.channels * 2
+        # Use previous_timestamp_ns for recording continuity; fall back to current time
+        start_time_ns = (
+            previous_timestamp_ns if previous_timestamp_ns > 0 else time.time_ns()
         )
-        response = GetAudioResponse(audio=chunk)
+        sample_rate = self.sample_rate
+        channels = self.channels
 
-        async def _audio_generator():
-            yield response
+        async def _audio_stream_generator():
+            sequence = 0
+            try:
+                while True:
+                    if process.stdout is None:
+                        break
 
-        return StreamWithIterator(_audio_generator())
+                    audio_data = await process.stdout.read(chunk_size)
+                    if not audio_data:
+                        break  # FFmpeg finished or stream ended
+
+                    # Calculate timestamps based on actual bytes read
+                    bytes_per_second = sample_rate * channels * 2
+                    chunk_duration_ns = int(
+                        (len(audio_data) / bytes_per_second) * 1_000_000_000
+                    )
+                    chunk_start_ns = start_time_ns + (sequence * 1_000_000_000)
+                    chunk_end_ns = chunk_start_ns + chunk_duration_ns
+
+                    chunk = AudioChunk(
+                        audio_data=audio_data,
+                        audio_info=AudioInfo(
+                            codec=codec_name,
+                            sample_rate_hz=sample_rate,
+                            num_channels=channels,
+                        ),
+                        start_timestamp_nanoseconds=chunk_start_ns,
+                        end_timestamp_nanoseconds=chunk_end_ns,
+                        sequence=sequence,
+                    )
+                    yield GetAudioResponse(audio=chunk)
+                    sequence += 1
+
+            finally:
+                # Clean up FFmpeg when the stream ends or client disconnects
+                if process.returncode is None:
+                    process.kill()
+                    await process.wait()
+
+        return StreamWithIterator(_audio_stream_generator())
 
     async def get_properties(
         self, *, timeout: Optional[float] = None, **kwargs
     ) -> AudioIn.Properties:
         return GetPropertiesResponse()
+
+    async def get_status(
+        self, *, timeout: Optional[float] = None, **kwargs
+    ) -> Mapping[str, ValueTypes]:
+        seconds_since_sound = (
+            time.time() - self._last_sound_time if self._last_sound_time > 0 else -1
+        )
+        return {
+            "sound_detected": self._sound_detected,
+            "rms": self._current_rms,
+            "peak": self._peak,
+            "threshold": self.sound_threshold,
+            "last_sound_seconds_ago": round(seconds_since_sound, 1),
+            "monitoring": self._monitoring,
+        }
 
     async def do_command(
         self,
@@ -260,19 +320,9 @@ class AudioIn(AudioIn, EasyResource):
         cmd_name = command.get("command", "")
 
         if cmd_name == "get_status":
-            seconds_since_sound = (
-                time.time() - self._last_sound_time if self._last_sound_time > 0 else -1
-            )
-            return {
-                "sound_detected": self._sound_detected,
-                "rms": self._current_rms,
-                "peak": self._peak,
-                "threshold": self.sound_threshold,
-                "last_sound_seconds_ago": round(seconds_since_sound, 1),
-                "monitoring": self._monitoring,
-            }
+            return await self.get_status(timeout=timeout)
 
-        # While a user can set the threshold in the config, it allows for changing the threshold during run time.
+        # While a user can set the threshold in the config, this allows changing it during run time.
         # Don't forget to update the config if a better threshold is determined.
         if cmd_name == "set_threshold":
             new_threshold = command.get("threshold", self.sound_threshold)
