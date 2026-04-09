@@ -259,28 +259,28 @@ class AudioIn(AudioIn, EasyResource):
     ) -> Mapping[str, ValueTypes]:
         cmd_name = command.get("command", "")
 
-        # While a user can set the threshold in the config, it allows for changing the threshold doing run time.
+        if cmd_name == "get_status":
+            seconds_since_sound = (
+                time.time() - self._last_sound_time if self._last_sound_time > 0 else -1
+            )
+            return {
+                "sound_detected": self._sound_detected,
+                "rms": self._current_rms,
+                "peak": self._peak,
+                "threshold": self.sound_threshold,
+                "last_sound_seconds_ago": round(seconds_since_sound, 1),
+                "monitoring": self._monitoring,
+            }
+
+        # While a user can set the threshold in the config, it allows for changing the threshold during run time.
         # Don't forget to update the config if a better threshold is determined.
         if cmd_name == "set_threshold":
             new_threshold = command.get("threshold", self.sound_threshold)
             self.sound_threshold = float(str(new_threshold))
             return {"threshold": self.sound_threshold}
 
-        return {"error": f"Unknown command: {cmd_name}. Available: set_threshold"}
-
-    async def get_status(
-        self, *, timeout: Optional[float] = None, **kwargs
-    ) -> Mapping[str, ValueTypes]:
-        seconds_since_sound = (
-            time.time() - self._last_sound_time if self._last_sound_time > 0 else -1
-        )
         return {
-            "sound_detected": self._sound_detected,
-            "rms": self._current_rms,
-            "peak": self._peak,
-            "threshold": self.sound_threshold,
-            "last_sound_seconds_ago": round(seconds_since_sound, 1),
-            "monitoring": self._monitoring,
+            "error": f"Unknown command: {cmd_name}. Available: get_status, set_threshold"
         }
 
     async def get_geometries(
