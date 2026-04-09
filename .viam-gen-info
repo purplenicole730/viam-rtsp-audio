@@ -1,0 +1,13 @@
+{
+  "module_name": "audio",
+  "visibility": "public",
+  "namespace": "jnj",
+  "language": "python",
+  "resource_type": "component",
+  "resource_subtype": "audio_in",
+  "model_name": "audio_in",
+  "initialize_git": false,
+  "generator_version": "0.1.0",
+  "generated_on": "2026-04-09T16:25:46.435093Z",
+  "module_readme_link": "README.md"
+}

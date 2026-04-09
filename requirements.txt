@@ -1,0 +1,3 @@
+viam-sdk==0.73.1
+typing-extensions
+numpy

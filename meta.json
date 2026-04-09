@@ -1,0 +1,28 @@
+{
+  "$schema": "https://dl.viam.dev/module.schema.json",
+  "module_id": "jnj:rtsp",
+  "visibility": "public",
+  "url": "",
+  "description": "Modular audio_in component for rtsp streams: audio_in",
+  "models": [
+    {
+      "api": "rdk:component:audio_in",
+      "model": "jnj:rtsp:audio_in",
+      "markdown_link": "jnj_rtsp_audio_in.md"
+    }
+  ],
+  "applications": null,
+  "markdown_link": "README.md",
+  "entrypoint": "dist/main",
+  "first_run": "",
+  "build": {
+    "build": "./build.sh",
+    "setup": "./setup.sh",
+    "path": "dist/archive.tar.gz",
+    "arch": [
+      "linux/amd64",
+      "linux/arm64",
+      "darwin/arm64"
+    ]
+  }
+}
